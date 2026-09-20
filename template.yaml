@@ -12,15 +12,19 @@ Globals:
 Parameters:
   SecretGuardConfigArn:
     Type: String
-    Description: ARN of the Secrets Manager secret containing github_token and webhook_secret
+    Description: ARN of Secrets Manager secret containing github_token and webhook_secret
+
   AlertEmail:
     Type: String
     Description: Email address for remediation alerts
+
   ProtectedUsers:
     Type: String
     Default: ''
+    Description: Comma-separated IAM usernames that SecretGuard must never disable
 
 Resources:
+
   SecretGuardApi:
     Type: AWS::Serverless::Api
     Properties:
@@ -54,23 +58,33 @@ Resources:
     Properties:
       Name: SecretGuardBus
 
+  # -----------------------------------------
+  # GitHub Webhook
+  # -----------------------------------------
+
   WebhookFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/webhook/
       Handler: app.lambda_handler
+
       Environment:
         Variables:
           SECRET_ARN: !Ref SecretGuardConfigArn
           EVENT_BUS_NAME: !Ref SecretGuardBus
+
       Policies:
         - Statement:
             - Effect: Allow
-              Action: secretsmanager:GetSecretValue
+              Action:
+                - secretsmanager:GetSecretValue
               Resource: !Ref SecretGuardConfigArn
+
             - Effect: Allow
-              Action: events:PutEvents
+              Action:
+                - events:PutEvents
               Resource: !GetAtt SecretGuardBus.Arn
+
       Events:
         GitHubWebhook:
           Type: Api
@@ -79,27 +93,38 @@ Resources:
             Path: /webhook
             Method: POST
 
+  # -----------------------------------------
+  # Secret Scanner
+  # -----------------------------------------
+
   ScannerFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/scanner/
       Handler: scanner.lambda_handler
       Timeout: 30
+
       Environment:
         Variables:
           SECRET_ARN: !Ref SecretGuardConfigArn
           FINDINGS_TABLE: !Ref FindingsTable
           EVENT_BUS_NAME: !Ref SecretGuardBus
+
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref FindingsTable
+
         - Statement:
             - Effect: Allow
-              Action: secretsmanager:GetSecretValue
+              Action:
+                - secretsmanager:GetSecretValue
               Resource: !Ref SecretGuardConfigArn
+
             - Effect: Allow
-              Action: events:PutEvents
+              Action:
+                - events:PutEvents
               Resource: !GetAtt SecretGuardBus.Arn
+
       Events:
         RepositoryPush:
           Type: EventBridgeRule
@@ -111,31 +136,43 @@ Resources:
               detail-type:
                 - RepositoryPush
 
+  # -----------------------------------------
+  # Credential Containment
+  # -----------------------------------------
+
   ContainmentFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/containment/
       Handler: app.lambda_handler
+
       Environment:
         Variables:
           FINDINGS_TABLE: !Ref FindingsTable
           EVENT_BUS_NAME: !Ref SecretGuardBus
           PROTECTED_USERS: !Ref ProtectedUsers
+
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref FindingsTable
+
         - Statement:
             - Effect: Allow
               Action:
                 - iam:GetAccessKeyLastUsed
                 - iam:GetUser
               Resource: '*'
+
             - Effect: Allow
-              Action: iam:UpdateAccessKey
+              Action:
+                - iam:UpdateAccessKey
               Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:user/secretguard-managed/*
+
             - Effect: Allow
-              Action: events:PutEvents
+              Action:
+                - events:PutEvents
               Resource: !GetAtt SecretGuardBus.Arn
+
       Events:
         SecretFinding:
           Type: EventBridgeRule
@@ -147,20 +184,29 @@ Resources:
               detail-type:
                 - FindingCreated
 
+  # -----------------------------------------
+  # Notification
+  # -----------------------------------------
+
   NotifierFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/notifier/
       Handler: app.lambda_handler
+
       Environment:
         Variables:
           REMEDIATION_TOPIC_ARN: !Ref RemediationTopic
+
       Policies:
         - Statement:
             - Effect: Allow
-              Action: sns:Publish
+              Action:
+                - sns:Publish
               Resource: !Ref RemediationTopic
+
       Events:
+
         FindingCreated:
           Type: EventBridgeRule
           Properties:
@@ -170,6 +216,7 @@ Resources:
                 - secretguard.scanner
               detail-type:
                 - FindingCreated
+
         ContainmentCompleted:
           Type: EventBridgeRule
           Properties:
@@ -181,10 +228,19 @@ Resources:
                 - ContainmentCompleted
 
 Outputs:
+
   WebhookUrl:
     Description: GitHub webhook URL
     Value: !Sub https://${SecretGuardApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook
+
   FindingsTableName:
+    Description: DynamoDB findings table
     Value: !Ref FindingsTable
+
   RemediationTopicArn:
+    Description: SNS remediation topic
     Value: !Ref RemediationTopic
+
+  SecretGuardBusName:
+    Description: EventBridge event bus
+    Value: !Ref SecretGuardBus
